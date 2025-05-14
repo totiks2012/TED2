@@ -1,6 +1,7 @@
 # hotkeys.tcl - Плагин для настройки основных горячих клавиш редактора
 # Created: 2025-05-07 11:28:45 by totiks2012
 # Updated: 2025-05-08 for stable block Undo/Redo functionality
+# Updated: 2025-05-14 Добавлены привязки для кириллической раскладки с использованием корректных keysyms
 
 namespace eval ::plugin::hotkeys {
     # Описание плагина
@@ -511,10 +512,18 @@ namespace eval ::plugin::hotkeys {
             return -code break
         }
         
+        # BIND: Отмена (undo)
         bind $widget <Control-z> {
             ::plugin::hotkeys::undo_char %W
             return -code break
         }
+        # Альтернативный биндинг для кириллической "я" (U+044F) с использованием корректного keysym
+        bind $widget <Control-Cyrillic_ya> {
+            ::plugin::hotkeys::undo_char %W
+            return -code break
+        }
+        
+        # BIND: Повтор (redo)
         bind $widget <Control-y> {
             ::plugin::hotkeys::redo_char %W
             return -code break
@@ -524,11 +533,18 @@ namespace eval ::plugin::hotkeys {
             return -code break
         }
         
+        # BIND: Выделить всё (select all)
         bind $widget <Control-a> {
             %W tag add sel 1.0 end
             return -code break
         }
+        # Альтернативный биндинг для кириллической "ф" (U+0444) с использованием корректного keysym
+        bind $widget <Control-Cyrillic_ef> {
+            %W tag add sel 1.0 end
+            return -code break
+        }
         
+        # BIND: Вырезать (cut)
         bind $widget <Control-x> {
             if {[%W tag ranges sel] ne ""} {
                 set start_pos [%W index sel.first]
@@ -543,14 +559,38 @@ namespace eval ::plugin::hotkeys {
             return -code break
         }
         
+        # BIND: Копировать (copy)
         bind $widget <Control-c> {
             if {[%W tag ranges sel] ne ""} {
                 tk_textCopy %W
             }
             return -code break
         }
+        # Альтернативный биндинг для кириллической "с" (U+0441) с использованием корректного keysym
+        bind $widget <Control-Cyrillic_es> {
+            if {[%W tag ranges sel] ne ""} {
+                tk_textCopy %W
+            }
+            return -code break
+        }
         
+        # BIND: Вставить (paste)
         bind $widget <Control-v> {
+            set start_pos [%W index insert]
+            tk_textPaste %W
+            set clipboard ""
+            catch {set clipboard [selection get -selection CLIPBOARD -type STRING]}
+            if {$clipboard ne ""} {
+                ::plugin::hotkeys::push_char %W "paste" $clipboard $start_pos
+            }
+            set tab [.tabs select]
+            if {[info exists ::core::tab_files($tab)]} {
+                ::core::check_modified $tab
+            }
+            return -code break
+        }
+        # Альтернативный биндинг для кириллической "м" (U+043C) с использованием корректного keysym
+        bind $widget <Control-Cyrillic_em> {
             set start_pos [%W index insert]
             tk_textPaste %W
             set clipboard ""
@@ -796,9 +836,18 @@ after 400 {
     }
 }
 
-# Глобальные привязки для Ctrl+Z и Ctrl+Y
+# Глобальные привязки для Ctrl+Z и Ctrl+Y, включая альтернативные варианты для кириллической раскладки
 after 500 {
     bind all <Control-z> {
+        set w [focus]
+        if {[winfo exists $w] && [string match "*text*" [winfo class $w]]} {
+            ::plugin::hotkeys::undo_char $w
+        }
+        return -code break
+    }
+    
+    # Альтернативный глобальный биндинг для кириллической "я" (U+044F)
+    bind all <Control-Cyrillic_ya> {
         set w [focus]
         if {[winfo exists $w] && [string match "*text*" [winfo class $w]]} {
             ::plugin::hotkeys::undo_char $w
