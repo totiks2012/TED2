@@ -1,6 +1,7 @@
 # run.tcl - Плагин для запуска скриптов
 # Created: 2025-05-05 16:49:09 by totiks2012
 # Modified: 2025-05-09 to ensure isolated execution of Tcl/Tk scripts
+# Modified: 2025-05-20 to add support for Python3 and Lua scripts
 
 namespace eval ::plugin::run {
     # Устанавливаем порядок кнопки - вторая после базовых кнопок (после "Права")
@@ -18,8 +19,8 @@ namespace eval ::plugin::run {
     variable plugin_info
     array set plugin_info {
         name "Run"
-        version "1.1"
-        description "Плагин для запуска скриптов с изоляцией Tcl/Tk"
+        version "1.2"
+        description "Плагин для запуска скриптов с поддержкой Python и Lua"
         author "totiks2012"
     }
     
@@ -198,6 +199,9 @@ namespace eval ::plugin::run {
         } elseif {[string match "#!/usr/bin/env ruby*" $first_line] || 
                  [string match "#!/usr/bin/ruby*" $first_line]} {
             return ".rb"
+        } elseif {[string match "#!/usr/bin/env lua*" $first_line] || 
+                 [string match "#!/usr/bin/lua*" $first_line]} {
+            return ".lua"
         } elseif {[string match "#!/usr/bin/wish*" $first_line] || 
                  [string match "#!/usr/bin/env wish*" $first_line] ||
                  [string match "package require Tk*" $first_line]} {
@@ -206,7 +210,18 @@ namespace eval ::plugin::run {
                  [string match "#!/usr/bin/env tclsh*" $first_line]} {
             return ".tcl"
         } else {
-            return ".tcl"
+            # Проверяем содержимое на соответствие типичным языковым конструкциям
+            set content [$tab.text get 1.0 "end"]
+            
+            if {[string match "*import *" $content] && 
+                ([string match "*def *(*):*" $content] || [string match "*print(*" $content])} {
+                return ".py"
+            } elseif {[string match "*function*(*)" $content] && 
+                     ([string match "*require*" $content] || [string match "*end*" $content])} {
+                return ".lua"
+            } else {
+                return ".tcl"
+            }
         }
     }
     
@@ -240,7 +255,28 @@ namespace eval ::plugin::run {
                 return "bash \"$filepath\""
             }
             ".py" {
-                return "python \"$filepath\""
+                # Проверяем доступные интерпретаторы Python
+                if {![catch {exec which python3}]} {
+                    return "python3 \"$filepath\""
+                } elseif {![catch {exec which python}]} {
+                    return "python \"$filepath\""
+                } else {
+                    # Предполагаем, что python3 должен быть доступен
+                    return "python3 \"$filepath\""
+                }
+            }
+            ".lua" {
+                # Проверяем доступные интерпретаторы Lua
+                if {![catch {exec which lua5.3}]} {
+                    return "lua5.3 \"$filepath\""
+                } elseif {![catch {exec which lua5.4}]} {
+                    return "lua5.4 \"$filepath\""
+                } elseif {![catch {exec which lua}]} {
+                    return "lua \"$filepath\""
+                } else {
+                    # Предполагаем, что lua должен быть доступен
+                    return "lua \"$filepath\""
+                }
             }
             ".pl" {
                 return "perl \"$filepath\""
@@ -252,6 +288,36 @@ namespace eval ::plugin::run {
                 if {$::tcl_platform(platform) eq "unix" && [file executable $filepath]} {
                     return "\"$filepath\""
                 } else {
+                    # Попытка определить тип файла по содержимому
+                    if {![catch {
+                        set f [open $filepath r]
+                        set content [read $f]
+                        close $f
+                        
+                        if {[string match "*import *" $content] && 
+                            ([string match "*def *(*):*" $content] || [string match "*print(*" $content])} {
+                            # Проверяем доступные интерпретаторы Python
+                            if {![catch {exec which python3}]} {
+                                return "python3 \"$filepath\""
+                            } else {
+                                return "python3 \"$filepath\""  # Всегда используем python3
+                            }
+                        } elseif {[string match "*function*(*)" $content] && 
+                                ([string match "*require*" $content] || [string match "*end*" $content])} {
+                            # Проверяем доступные интерпретаторы Lua
+                            if {![catch {exec which lua5.3}]} {
+                                return "lua5.3 \"$filepath\""
+                            } elseif {![catch {exec which lua}]} {
+                                return "lua \"$filepath\""
+                            } else {
+                                return "lua \"$filepath\""  # Предполагаем, что lua должен быть доступен
+                            }
+                        }
+                    }]} {
+                        # Не удалось определить по содержимому
+                        return ""
+                    }
+                    
                     return ""
                 }
             }
