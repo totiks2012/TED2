@@ -1,6 +1,7 @@
 # block.tcl - Плагин для блочной замены текста
 # Created: 2025-05-05 17:35:22 by totiks2012
-# Updated: 2025-05-20 07:22:30 by totiks2012 - стабильная версия ,исправлена логика блочного выделения, для последующго копирования найденого блока
+# Updated: 2025-05-20 07:22:30 by totiks2012 - стабильная версия, исправлена логика блочного выделения, для последующго копирования найденого блока
+# Updated: 2025-05-20 16:50:00 by totiks2012 - исправлена проблема двойной инициализации плагина и поведение при вводе текста в диалоге
 
 namespace eval ::plugin::block {
     # Устанавливаем порядок кнопки - четвертая после базовых кнопок
@@ -9,11 +10,14 @@ namespace eval ::plugin::block {
     # Переменные плагина
     variable replace_all 0    ;# Переменная для опции "Заменить все"
     
+    # Переменная для отслеживания инициализации
+    variable initialized 0
+    
     # Описание плагина
     variable plugin_info
     array set plugin_info {
         name "Block"
-        version "1.2.2"
+        version "1.2.4"
         description "Плагин для блочной замены текста"
         author "totiks2012"
     }
@@ -21,6 +25,12 @@ namespace eval ::plugin::block {
     # Инициализация плагина
     proc init {} {
         variable button_order
+        variable initialized
+        
+        # Проверяем, не был ли плагин уже инициализирован
+        if {$initialized} {
+            return 1
+        }
         
         # Регистрируем кнопку в панели инструментов
         set block_button [::core::register_plugin_button "block" "🧱 Block" ::plugin::block::show_complex_replace_dialog "" $button_order]
@@ -28,6 +38,9 @@ namespace eval ::plugin::block {
         # Регистрируем горячие клавиши
         bind . <Control-Shift-F> { ::plugin::block::show_complex_replace_dialog }
         bind . <Control-Shift-f> { ::plugin::block::show_complex_replace_dialog }
+        
+        # Отмечаем плагин как инициализированный
+        set initialized 1
         
         return 1
     }
@@ -131,8 +144,33 @@ namespace eval ::plugin::block {
         grid columnconfigure $w.f.buttons 3 -weight 0
 
         # Привязки клавиш для диалога
-        bind $w <Return> "::plugin::block::find_complex_replace \[$w.f.start.entry get\] \[$w.f.end.entry get\]"
-        bind $w <Control-Return> "::plugin::block::do_complex_replace \[$w.f.start.entry get\] \[$w.f.end.entry get\] \[$w.f.newcode.text get 1.0 end-1c\]"
+        # Изменяем привязки клавиш, чтобы предотвратить нежелательное поведение
+        bind $w <Return> {
+            # Находим виджет, на котором сейчас фокус
+            set focused [focus]
+            # Если фокус на полях ввода, то не выполняем поиск
+            if {[string match "*entry" $focused]} {
+                # Ничего не делаем, позволяя стандартное поведение поля ввода
+                break
+            } elseif {[string match "*text" $focused]} {
+                # Если фокус на текстовом поле, вставляем новую строку
+                event generate $focused <<Paste-Text>> -data "\n"
+                break
+            } else {
+                # В других случаях выполняем поиск
+                ::plugin::block::find_complex_replace \
+                    [.complex_replace_dialog.f.start.entry get] \
+                    [.complex_replace_dialog.f.end.entry get]
+            }
+        }
+        
+        bind $w <Control-Return> {
+            ::plugin::block::do_complex_replace \
+                [.complex_replace_dialog.f.start.entry get] \
+                [.complex_replace_dialog.f.end.entry get] \
+                [.complex_replace_dialog.f.newcode.text get 1.0 end-1c]
+        }
+        
         bind $w <Escape> "destroy $w"
 
         # Очищаем флаг модификации и отключаем событие <<Modified>>
@@ -374,8 +412,5 @@ namespace eval ::plugin::block {
     }
 }
 
-# Инициализация плагина
-if {![info exists ::plugin::block::initialized]} {
-    ::plugin::block::init
-    set ::plugin::block::initialized 1
-}
+# Инициализация плагина - вызываем только один раз
+::plugin::block::init
