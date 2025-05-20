@@ -1,5 +1,6 @@
 # block.tcl - Плагин для блочной замены текста
 # Created: 2025-05-05 17:35:22 by totiks2012
+# Updated: 2025-05-20 07:22:30 by totiks2012 - стабильная версия ,исправлена логика блочного выделения, для последующго копирования найденого блока
 
 namespace eval ::plugin::block {
     # Устанавливаем порядок кнопки - четвертая после базовых кнопок
@@ -12,7 +13,7 @@ namespace eval ::plugin::block {
     variable plugin_info
     array set plugin_info {
         name "Block"
-        version "1.0"
+        version "1.2.2"
         description "Плагин для блочной замены текста"
         author "totiks2012"
     }
@@ -29,6 +30,13 @@ namespace eval ::plugin::block {
         bind . <Control-Shift-f> { ::plugin::block::show_complex_replace_dialog }
         
         return 1
+    }
+    
+    # Процедура для регистрации действий в системе отмены
+    proc register_undo {widget operation text pos {end_pos ""}} {
+        if {[info commands ::plugin::hotkeys::push_char] ne ""} {
+            ::plugin::hotkeys::push_char $widget $operation $text $pos $end_pos
+        }
     }
     
     # Процедура показа диалога блочной замены
@@ -200,56 +208,71 @@ namespace eval ::plugin::block {
         }
         
         # Находим начальную метку
-        set start_pos [$txt search -- $start_marker 1.0 end]
+        set start_pos [$txt search -nocase -- $start_marker 1.0 end]
         if {$start_pos eq ""} {
             tk_messageBox -icon info -title "Поиск" \
                 -message "Начальная метка \"$start_marker\" не найдена."
             return 0
         }
 
-        # Получаем номер строки начальной метки и переходим к следующей строке
-        set start_line [lindex [split $start_pos .] 0]
-        set start_pos "$start_line.0 lineend + 1c"
-        if {[$txt compare $start_pos >= end]} {
+        # Находим конец стартовой метки, чтобы начать выделение после неё
+        set start_marker_end [$txt search -nocase -exact -forwards -- $start_marker $start_pos]
+        set start_marker_end "$start_marker_end + [string length $start_marker] chars"
+        
+        # Получаем номер строки конца начальной метки и переходим к следующей строке
+        # Это позволит захватить весь блок начиная с новой строки после начальной метки
+        set start_line [lindex [split $start_marker_end .] 0]
+        set block_start "$start_line.0 lineend + 1c"
+        
+        if {[$txt compare $block_start >= end]} {
             tk_messageBox -icon info -title "Поиск" \
                 -message "Нет строк после начальной метки."
             return 0
         }
 
         # Находим конечную метку, начиная с позиции после начальной метки
-        set end_pos [$txt search -- $end_marker $start_pos end]
-        if {$end_pos eq ""} {
+        set end_marker_start [$txt search -nocase -- $end_marker $block_start end]
+        if {$end_marker_start eq ""} {
             tk_messageBox -icon info -title "Поиск" \
                 -message "Конечная метка \"$end_marker\" не найдена."
             return 0
         }
 
-        # Получаем номер строки конечной метки и переходим к началу предыдущей строки
-        set end_line [lindex [split $end_pos .] 0]
+        # Получаем номер строки конечной метки
+        set end_line [lindex [split $end_marker_start .] 0]
+        
+        # Проверяем, что между метками есть строки
         if {$end_line <= $start_line + 1} {
             tk_messageBox -icon info -title "Поиск" \
                 -message "Нет строк между метками."
             return 0
         }
-        set end_pos "[expr {$end_line - 1}].0 lineend"
-
-        # Выделяем блок от начала следующей строки после начальной метки
-        # до конца предыдущей строки перед конечной меткой
-        $txt tag remove sel 1.0 end
-        $txt tag add sel $start_pos $end_pos
-        $txt mark set insert $start_pos
-        $txt see $start_pos
         
-        # Копируем выделенный текст в поле нового кода
-        set selected_text [$txt get $start_pos $end_pos]
+        # Устанавливаем конечную позицию для выделения до начала строки с конечной меткой
+        set block_end "$end_line.0"
+
+        # Очищаем любые существующие выделения
+        $txt tag remove sel 1.0 end
+        
+        # Выделяем блок между метками
+        $txt tag add sel $block_start $block_end
+        
+        # Устанавливаем курсор в начало выделения и прокручиваем экран к нему
+        $txt mark set insert $block_start
+        $txt see $block_start
+        
+        # Принудительно обновляем отображение для гарантии, что выделение будет видно
+        update idletasks
+        
+        # Фокусируем текстовое поле активной вкладки, чтобы выделение было видно
+        focus $txt
+        
+        # Копируем выделенный текст в поле нового кода диалога
+        # для удобства, если пользователь хочет его отредактировать
+        set selected_text [$txt get sel.first sel.last]
         if {[winfo exists .complex_replace_dialog]} {
             .complex_replace_dialog.f.newcode.text delete 1.0 end
             .complex_replace_dialog.f.newcode.text insert 1.0 $selected_text
-            # Выделяем весь вставленный текст для удобства
-            .complex_replace_dialog.f.newcode.text tag add sel 1.0 end
-            .complex_replace_dialog.f.newcode.text see 1.0
-            # Передаем фокус на текстовое поле для удобства редактирования
-            focus .complex_replace_dialog.f.newcode.text
         }
         
         return 1
@@ -268,15 +291,42 @@ namespace eval ::plugin::block {
         }
 
         set txt $current_tab.text
-        if {![find_complex_replace $start_marker $end_marker]} {
-            return
+        
+        # Проверяем, существует ли выделение
+        if {[$txt tag ranges sel] eq ""} {
+            # Если нет выделения, сначала вызываем поиск
+            if {![find_complex_replace $start_marker $end_marker]} {
+                return
+            }
         }
 
-        # Заменяем выделенный блок строк
+        # Теперь получаем актуальные позиции выделения
         set start_pos [$txt index sel.first]
         set end_pos [$txt index sel.last]
+        
+        # Проверяем, что выделение существует
+        if {$start_pos eq "" || $end_pos eq ""} {
+            tk_messageBox -icon warning -title "Замена" \
+                -message "Не удалось определить выделение для замены."
+            return
+        }
+        
+        # Сохраняем исходный текст для Undo
+        set original_text [$txt get $start_pos $end_pos]
+        
+        # Регистрируем удаление для системы отмены действий
+        register_undo $txt "delete" $original_text $start_pos $end_pos
+        
+        # Удаляем выделенный текст
         $txt delete $start_pos $end_pos
-        $txt insert $start_pos $new_code
+        
+        # Вставляем новый код (если он не пустой)
+        if {$new_code ne ""} {
+            $txt insert $start_pos $new_code
+            
+            # Регистрируем вставку для системы отмены действий
+            register_undo $txt "insert" $new_code $start_pos
+        }
 
         # Отмечаем файл как модифицированный
         if {[info exists ::core::modified_tabs($current_tab)]} {
@@ -290,17 +340,42 @@ namespace eval ::plugin::block {
         if {$replace_all} {
             set count 1
             while {[find_complex_replace $start_marker $end_marker]} {
+                if {[$txt tag ranges sel] eq ""} {
+                    break
+                }
                 set start_pos [$txt index sel.first]
                 set end_pos [$txt index sel.last]
+                
+                # Сохраняем исходный текст для Undo
+                set original_text [$txt get $start_pos $end_pos]
+                
+                # Регистрируем удаление для системы отмены действий
+                register_undo $txt "delete" $original_text $start_pos $end_pos
+                
+                # Удаляем выделение
                 $txt delete $start_pos $end_pos
-                $txt insert $start_pos $new_code
+                
+                # Вставляем новый код (если не пустой)
+                if {$new_code ne ""} {
+                    $txt insert $start_pos $new_code
+                    
+                    # Регистрируем вставку для системы отмены действий
+                    register_undo $txt "insert" $new_code $start_pos
+                }
+                
                 incr count
             }
             tk_messageBox -icon info -title "Замена" \
                 -message "Заменено блоков: $count"
         } else {
-            # Ищем следующий блок
+            # Ищем следующий блок через небольшую задержку
             after 100 [list ::plugin::block::find_complex_replace $start_marker $end_marker]
         }
     }
+}
+
+# Инициализация плагина
+if {![info exists ::plugin::block::initialized]} {
+    ::plugin::block::init
+    set ::plugin::block::initialized 1
 }
