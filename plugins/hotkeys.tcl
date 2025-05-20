@@ -2,13 +2,14 @@
 # Created: 2025-05-07 11:28:45 by totiks2012
 # Updated: 2025-05-08 for stable block Undo/Redo functionality
 # Updated: 2025-05-14 Добавлены привязки для кириллической раскладки с использованием корректных keysyms
+# Updated: 2025-05-20 Добавлена поддержка кириллической клавиши для Ctrl+S (сохранение)
 
 namespace eval ::plugin::hotkeys {
     # Описание плагина
     variable plugin_info
     array set plugin_info {
         name "Editor Hotkeys"
-        version "1.2"
+        version "1.3"
         description "Настройка горячих клавиш редактора с надежным Undo/Redo для блочных операций"
         author "totiks2012"
     }
@@ -400,6 +401,9 @@ namespace eval ::plugin::hotkeys {
         }
         
         bind . <Control-s> ::plugin::hotkeys::save_without_artifacts
+        # Альтернативный биндинг для кириллической "ы" (U+044B) с использованием корректного keysym
+        bind . <Control-Cyrillic_yeru> ::plugin::hotkeys::save_without_artifacts
+        
         bind . <Control-Shift-S> {
             if {[info commands ::core::save_as_file] ne ""} {
                 ::core::save_as_file
@@ -462,8 +466,11 @@ namespace eval ::plugin::hotkeys {
         catch {$widget configure -undo 0}
         bindtags $widget "$widget Text [winfo toplevel $widget] all"
         
+        # BIND: Сохранить (save) - Control+S
         bind $widget <Control-s> ::plugin::hotkeys::save_without_artifacts
         bind $widget <Control-Key-s> ::plugin::hotkeys::save_without_artifacts
+        # Альтернативный биндинг для кириллической "ы" (U+044B) с использованием корректного keysym
+        bind $widget <Control-Cyrillic_yeru> ::plugin::hotkeys::save_without_artifacts
         
         bind $widget <KeyPress> {
             if {"%A" ne "" && [string length "%A"] == 1} {
@@ -867,6 +874,24 @@ after 500 {
         set w [focus]
         if {[winfo exists $w] && [string match "*text*" [winfo class $w]]} {
             ::plugin::hotkeys::redo_char $w
+        }
+        return -code break
+    }
+    
+    # Глобальный биндинг для Ctrl+S (сохранение)
+    bind all <Control-s> {
+        set w [focus]
+        if {[winfo exists $w] && [string match "*text*" [winfo class $w]]} {
+            ::plugin::hotkeys::save_without_artifacts
+        }
+        return -code break
+    }
+    
+    # Альтернативный глобальный биндинг для кириллической "ы" (U+044B)
+    bind all <Control-Cyrillic_yeru> {
+        set w [focus]
+        if {[winfo exists $w] && [string match "*text*" [winfo class $w]]} {
+            ::plugin::hotkeys::save_without_artifacts
         }
         return -code break
     }
