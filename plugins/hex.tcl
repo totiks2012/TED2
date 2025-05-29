@@ -235,6 +235,9 @@ namespace eval ::plugin::hex {
         $canvas create oval 10 10 [expr {$size - 10}] [expr {$size - 10}] \
             -fill white -outline "#CCCCCC" -width 1 -tags wheel_bg
         
+        # Используем максимальную яркость для отображения всей цветовой гаммы
+        set max_brightness 100
+        
         # Заполняем изображение пикселями
         for {set y 0} {$y < $size} {incr y} {
             for {set x 0} {$x < $size} {incr x} {
@@ -254,8 +257,9 @@ namespace eval ::plugin::hex {
                     # Нормализуем расстояние для насыщенности (0-100%)
                     set sat [expr {$distance / $radius * 100}]
                     
-                    # Получаем RGB значения для текущего пикселя
-                    set rgb [hsb_to_rgb $angle $sat $brightness]
+                    # Получаем RGB значения для текущего пикселя с максимальной яркостью
+                    # Используем max_brightness вместо текущей brightness переменной
+                    set rgb [hsb_to_rgb $angle $sat $max_brightness]
                     set r [lindex $rgb 0]
                     set g [lindex $rgb 1]
                     set b [lindex $rgb 2]
