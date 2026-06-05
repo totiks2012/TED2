@@ -1,416 +1,251 @@
-# block.tcl - Плагин для блочной замены текста
-# Created: 2025-05-05 17:35:22 by totiks2012
-# Updated: 2025-05-20 07:22:30 by totiks2012 - стабильная версия, исправлена логика блочного выделения, для последующго копирования найденого блока
-# Updated: 2025-05-20 16:50:00 by totiks2012 - исправлена проблема двойной инициализации плагина и поведение при вводе текста в диалоге
+# block.tcl - Минималистичный плагин для блочного выделения
+# Rewritten: 2026-01-14 - Полностью безмодальное решение
 
 namespace eval ::plugin::block {
-    # Устанавливаем порядок кнопки - четвертая после базовых кнопок
-    variable button_order 4
-    
-    # Переменные плагина
-    variable replace_all 0    ;# Переменная для опции "Заменить все"
-    
-    # Переменная для отслеживания инициализации
-    variable initialized 0
-    
-    # Описание плагина
-    variable plugin_info
-    array set plugin_info {
-        name "Block"
-        version "1.2.4"
-        description "Плагин для блочной замены текста"
-        author "totiks2012"
-    }
+    # Переменные для отслеживания состояния
+    variable selection_mode 0  ;# 0=выключено, 1=жду начальную, 2=жду конечную
+    variable start_pos {}      ;# Начальная позиция выделения
+    variable end_pos {}        ;# Конечная позиция выделения
+    variable last_widget {}    ;# Последний текстовый виджет, в котором кликали
     
     # Инициализация плагина
     proc init {} {
-        variable button_order
-        variable initialized
+        # Регистрируем горячие клавиши для активации режима выделения
+        # (пользователь будет использовать Ctrl+Shift+клик, как описано)
         
-        # Проверяем, не был ли плагин уже инициализирован
-        if {$initialized} {
-            return 1
-        }
+        # Привязываем Ctrl+Shift+клик ко всем текстовым виджетам вкладок
+        bind_all_text_widgets
         
-        # Регистрируем кнопку в панели инструментов
-        set block_button [::core::register_plugin_button "block" "🧱 Block" ::plugin::block::show_complex_replace_dialog "" $button_order]
+        # Также привязываем глобально для новых вкладок
+        bind .tabs <<NotebookTabChanged>> "::plugin::block::bind_all_text_widgets"
         
-        # Регистрируем горячие клавиши
-        bind . <Control-Shift-F> { ::plugin::block::show_complex_replace_dialog }
-        bind . <Control-Shift-f> { ::plugin::block::show_complex_replace_dialog }
-        
-        # Отмечаем плагин как инициализированный
-        set initialized 1
+        # Выводим информационное сообщение при запуске
+        puts "Плагин Block активирован. Используйте Ctrl+Shift+клик для выделения блоков."
         
         return 1
     }
     
-    # Процедура для регистрации действий в системе отмены
-    proc register_undo {widget operation text pos {end_pos ""}} {
-        if {[info commands ::plugin::hotkeys::push_char] ne ""} {
-            ::plugin::hotkeys::push_char $widget $operation $text $pos $end_pos
-        }
-    }
-    
-    # Процедура показа диалога блочной замены
-    proc show_complex_replace_dialog {} {
-        variable replace_all
-
-        # Создаем модальное окно
-        set w .complex_replace_dialog
-        catch {destroy $w}
-        toplevel $w
-        wm title $w "Блочная замена"
-        wm transient $w .
-        wm resizable $w 1 1
-
-        # Создаем и размещаем элементы управления
-        ttk::frame $w.f -padding "10 10 10 10"
-        pack $w.f -expand 1 -fill both
-
-        # Поле для начальной метки
-        ttk::labelframe $w.f.start -text "Начальная метка:"
-        pack $w.f.start -fill x -pady 2
-        entry $w.f.start.entry -width 40
-        pack $w.f.start.entry -fill x -padx 5 -pady 2
-        
-        # Глобальные привязки для Ctrl+A и стандартных операций копирования/вставки для полей entry
-        bind $w.f.start.entry <Control-a> {%W selection range 0 end; break}
-        bind $w.f.start.entry <Control-A> {%W selection range 0 end; break}
-        
-        # Стандартные комбинации копирования/вставки для полей entry
-        bind $w.f.start.entry <Control-c> {event generate %W <<Copy>>; break}
-        bind $w.f.start.entry <Control-v> {event generate %W <<Paste>>; break}
-        bind $w.f.start.entry <Control-x> {event generate %W <<Cut>>; break}
-
-        # Поле для конечной метки
-        ttk::labelframe $w.f.end -text "Конечная метка:"
-        pack $w.f.end -fill x -pady 2
-        entry $w.f.end.entry -width 40
-        pack $w.f.end.entry -fill x -padx 5 -pady 2
-        
-        # Привязки для второго поля entry
-        bind $w.f.end.entry <Control-a> {%W selection range 0 end; break}
-        bind $w.f.end.entry <Control-A> {%W selection range 0 end; break}
-        bind $w.f.end.entry <Control-c> {event generate %W <<Copy>>; break}
-        bind $w.f.end.entry <Control-v> {event generate %W <<Paste>>; break}
-        bind $w.f.end.entry <Control-x> {event generate %W <<Cut>>; break}
-
-        # Текстовое поле для нового кода
-        ttk::labelframe $w.f.newcode -text "Новый код:"
-        pack $w.f.newcode -fill both -expand 1 -pady 2
-        
-        # Добавляем скроллбары для текстового поля
-        text $w.f.newcode.text -width 60 -height 15 -wrap none \
-            -xscrollcommand "$w.f.newcode.xscroll set" \
-            -yscrollcommand "$w.f.newcode.yscroll set"
-        ttk::scrollbar $w.f.newcode.yscroll -orient vertical -command "$w.f.newcode.text yview"
-        ttk::scrollbar $w.f.newcode.xscroll -orient horizontal -command "$w.f.newcode.text xview"
-        
-        # Размещаем текстовое поле и скроллбары
-        grid $w.f.newcode.text -row 0 -column 0 -sticky nsew
-        grid $w.f.newcode.yscroll -row 0 -column 1 -sticky ns
-        grid $w.f.newcode.xscroll -row 1 -column 0 -sticky ew
-        grid columnconfigure $w.f.newcode 0 -weight 1
-        grid rowconfigure $w.f.newcode 0 -weight 1
-        
-        # Привязки для текстового поля
-        bind $w.f.newcode.text <Control-a> {%W tag add sel 1.0 end; break}
-        bind $w.f.newcode.text <Control-A> {%W tag add sel 1.0 end; break}
-        bind $w.f.newcode.text <Control-c> {event generate %W <<Copy>>; break}
-        bind $w.f.newcode.text <Control-v> {event generate %W <<Paste>>; break}
-        bind $w.f.newcode.text <Control-x> {event generate %W <<Cut>>; break}
-
-        # Кнопки
-        ttk::frame $w.f.buttons
-        pack $w.f.buttons -fill x -pady 5
-        ttk::button $w.f.buttons.find -text "Найти" \
-            -command "::plugin::block::find_complex_replace \[$w.f.start.entry get\] \[$w.f.end.entry get\]"
-        ttk::button $w.f.buttons.replace -text "Заменить" \
-            -command "::plugin::block::do_complex_replace \[$w.f.start.entry get\] \[$w.f.end.entry get\] \[$w.f.newcode.text get 1.0 end-1c\]"
-        ttk::button $w.f.buttons.cancel -text "Закрыть" \
-            -command "destroy $w"
-        ttk::checkbutton $w.f.buttons.all -text "Заменить все" \
-            -variable ::plugin::block::replace_all
-
-        # Размещаем кнопки
-        grid $w.f.buttons.find $w.f.buttons.replace $w.f.buttons.cancel -padx 5 -pady 5 -sticky ew
-        grid $w.f.buttons.all -row 0 -column 3 -padx 5 -pady 5 -sticky e
-        
-        # Настраиваем одинаковый размер кнопок
-        grid columnconfigure $w.f.buttons 0 -weight 1
-        grid columnconfigure $w.f.buttons 1 -weight 1
-        grid columnconfigure $w.f.buttons 2 -weight 1
-        grid columnconfigure $w.f.buttons 3 -weight 0
-
-        # Привязки клавиш для диалога
-        # Изменяем привязки клавиш, чтобы предотвратить нежелательное поведение
-        bind $w <Return> {
-            # Находим виджет, на котором сейчас фокус
-            set focused [focus]
-            # Если фокус на полях ввода, то не выполняем поиск
-            if {[string match "*entry" $focused]} {
-                # Ничего не делаем, позволяя стандартное поведение поля ввода
-                break
-            } elseif {[string match "*text" $focused]} {
-                # Если фокус на текстовом поле, вставляем новую строку
-                event generate $focused <<Paste-Text>> -data "\n"
-                break
-            } else {
-                # В других случаях выполняем поиск
-                ::plugin::block::find_complex_replace \
-                    [.complex_replace_dialog.f.start.entry get] \
-                    [.complex_replace_dialog.f.end.entry get]
+    # Привязка ко всем текстовым виджетам
+    proc bind_all_text_widgets {} {
+        # Удаляем старые привязки
+        foreach tab [.tabs tabs] {
+            set txt $tab.text
+            if {[winfo exists $txt]} {
+                bind $txt <Control-Shift-Button-1> {}
+                bind $txt <ButtonRelease-Control-Shift-Button-1> {}
             }
         }
         
-        bind $w <Control-Return> {
-            ::plugin::block::do_complex_replace \
-                [.complex_replace_dialog.f.start.entry get] \
-                [.complex_replace_dialog.f.end.entry get] \
-                [.complex_replace_dialog.f.newcode.text get 1.0 end-1c]
-        }
-        
-        bind $w <Escape> "destroy $w"
-
-        # Очищаем флаг модификации и отключаем событие <<Modified>>
-        $w.f.newcode.text edit modified 0
-        
-        # Устанавливаем минимальный размер окна
-        wm minsize $w 500 400
-        
-        # Центрируем окно
-        wm withdraw $w
-        update idletasks
-        set x [expr {([winfo screenwidth .] - [winfo reqwidth $w]) / 2}]
-        set y [expr {([winfo screenheight .] - [winfo reqheight $w]) / 2}]
-        wm geometry $w +$x+$y
-        wm deiconify $w
-
-        # Фокус на поле начальной метки
-        focus $w.f.start.entry
-
-        # Применяем тему
-        apply_theme_to_dialog $w
-    }
-    
-    # Применение темы к диалогу
-    proc apply_theme_to_dialog {w} {
-        # Определяем цвета в зависимости от текущей темы
-        if {[info exists ::core::config(theme)] && $::core::config(theme) eq "dark"} {
-            set entry_bg "#2D2D2D"
-            set entry_fg "#CCCACA"
-            set insert_bg "#FFFFFF" ;# Светлый курсор
-            set text_bg "#2D2D2D"
-            set text_fg "#CCCACA"
-        } else {
-            set entry_bg "#FFFFFF"
-            set entry_fg "#000000"
-            set insert_bg "#000000" ;# Темный курсор
-            set text_bg "#FFFFFF"
-            set text_fg "#000000"
-        }
-
-        # Применяем цвета к элементам диалога
-        $w.f.newcode.text configure \
-            -background $text_bg \
-            -foreground $text_fg \
-            -insertbackground $insert_bg
-        $w.f.start.entry configure \
-            -background $entry_bg \
-            -foreground $entry_fg \
-            -insertbackground $insert_bg
-        $w.f.end.entry configure \
-            -background $entry_bg \
-            -foreground $entry_fg \
-            -insertbackground $insert_bg
-    }
-
-    # Процедура поиска блока строк между метками
-    proc find_complex_replace {start_marker end_marker} {
-        # Получаем текущую вкладку
-        set current_tab [.tabs select]
-        if {$current_tab eq ""} {
-            tk_messageBox -icon warning -title "Поиск" \
-                -message "Нет открытой вкладки."
-            return 0
-        }
-
-        set txt $current_tab.text
-        
-        # Проверяем, не пустые ли маркеры
-        if {$start_marker eq "" || $end_marker eq ""} {
-            tk_messageBox -icon warning -title "Поиск" \
-                -message "Начальная и конечная метки не могут быть пустыми."
-            return 0
-        }
-        
-        # Находим начальную метку
-        set start_pos [$txt search -nocase -- $start_marker 1.0 end]
-        if {$start_pos eq ""} {
-            tk_messageBox -icon info -title "Поиск" \
-                -message "Начальная метка \"$start_marker\" не найдена."
-            return 0
-        }
-
-        # Находим конец стартовой метки, чтобы начать выделение после неё
-        set start_marker_end [$txt search -nocase -exact -forwards -- $start_marker $start_pos]
-        set start_marker_end "$start_marker_end + [string length $start_marker] chars"
-        
-        # Получаем номер строки конца начальной метки и переходим к следующей строке
-        # Это позволит захватить весь блок начиная с новой строки после начальной метки
-        set start_line [lindex [split $start_marker_end .] 0]
-        set block_start "$start_line.0 lineend + 1c"
-        
-        if {[$txt compare $block_start >= end]} {
-            tk_messageBox -icon info -title "Поиск" \
-                -message "Нет строк после начальной метки."
-            return 0
-        }
-
-        # Находим конечную метку, начиная с позиции после начальной метки
-        set end_marker_start [$txt search -nocase -- $end_marker $block_start end]
-        if {$end_marker_start eq ""} {
-            tk_messageBox -icon info -title "Поиск" \
-                -message "Конечная метка \"$end_marker\" не найдена."
-            return 0
-        }
-
-        # Получаем номер строки конечной метки
-        set end_line [lindex [split $end_marker_start .] 0]
-        
-        # Проверяем, что между метками есть строки
-        if {$end_line <= $start_line + 1} {
-            tk_messageBox -icon info -title "Поиск" \
-                -message "Нет строк между метками."
-            return 0
-        }
-        
-        # Устанавливаем конечную позицию для выделения до начала строки с конечной меткой
-        set block_end "$end_line.0"
-
-        # Очищаем любые существующие выделения
-        $txt tag remove sel 1.0 end
-        
-        # Выделяем блок между метками
-        $txt tag add sel $block_start $block_end
-        
-        # Устанавливаем курсор в начало выделения и прокручиваем экран к нему
-        $txt mark set insert $block_start
-        $txt see $block_start
-        
-        # Принудительно обновляем отображение для гарантии, что выделение будет видно
-        update idletasks
-        
-        # Фокусируем текстовое поле активной вкладки, чтобы выделение было видно
-        focus $txt
-        
-        # Копируем выделенный текст в поле нового кода диалога
-        # для удобства, если пользователь хочет его отредактировать
-        set selected_text [$txt get sel.first sel.last]
-        if {[winfo exists .complex_replace_dialog]} {
-            .complex_replace_dialog.f.newcode.text delete 1.0 end
-            .complex_replace_dialog.f.newcode.text insert 1.0 $selected_text
-        }
-        
-        return 1
-    }
-
-    # Процедура выполнения сложной замены (блок строк)
-    proc do_complex_replace {start_marker end_marker new_code} {
-        variable replace_all
-        
-        # Получаем текущую вкладку
-        set current_tab [.tabs select]
-        if {$current_tab eq ""} {
-            tk_messageBox -icon warning -title "Замена" \
-                -message "Нет открытой вкладки."
-            return
-        }
-
-        set txt $current_tab.text
-        
-        # Проверяем, существует ли выделение
-        if {[$txt tag ranges sel] eq ""} {
-            # Если нет выделения, сначала вызываем поиск
-            if {![find_complex_replace $start_marker $end_marker]} {
-                return
+        # Добавляем новые привязки
+        foreach tab [.tabs tabs] {
+            set txt $tab.text
+            if {[winfo exists $txt]} {
+                # При нажатии Ctrl+Shift+кнопка мыши
+                bind $txt <Control-Shift-Button-1> \
+                    "+::plugin::block::handle_click_start %W %x %y"
+                
+                # При отпускании - фиксируем позицию
+                bind $txt <ButtonRelease-Control-Shift-Button-1> \
+                    "+::plugin::block::handle_click_end %W %x %y"
             }
         }
-
-        # Теперь получаем актуальные позиции выделения
-        set start_pos [$txt index sel.first]
-        set end_pos [$txt index sel.last]
+    }
+    
+    # Обработка начала клика
+    proc handle_click_start {widget x y} {
+        variable selection_mode
+        variable last_widget
         
-        # Проверяем, что выделение существует
-        if {$start_pos eq "" || $end_pos eq ""} {
-            tk_messageBox -icon warning -title "Замена" \
-                -message "Не удалось определить выделение для замены."
+        # Запоминаем виджет
+        set last_widget $widget
+        
+        # Если это первый клик (режим 0), переходим в режим ожидания начальной точки
+        if {$selection_mode == 0} {
+            set selection_mode 1
+            # Показываем подсказку в статусной строке (если есть)
+            show_status "Выберите начальную точку выделения (отпустите Ctrl+Shift)"
             return
         }
+    }
+    
+    # Обработка окончания клика (когда отпускают клавиши)
+    proc handle_click_end {widget x y} {
+        variable selection_mode
+        variable start_pos
+        variable end_pos
+        variable last_widget
         
-        # Сохраняем исходный текст для Undo
-        set original_text [$txt get $start_pos $end_pos]
+        # Получаем позицию в тексте
+        set pos [$widget index @$x,$y]
         
-        # Регистрируем удаление для системы отмены действий
-        register_undo $txt "delete" $original_text $start_pos $end_pos
-        
-        # Удаляем выделенный текст
-        $txt delete $start_pos $end_pos
-        
-        # Вставляем новый код (если он не пустой)
-        if {$new_code ne ""} {
-            $txt insert $start_pos $new_code
+        if {$selection_mode == 1} {
+            # Устанавливаем начальную позицию
+            set start_pos $pos
+            set selection_mode 2
+            show_status "Начальная точка установлена. Выберите конечную точку (отпустите Ctrl+Shift)"
             
-            # Регистрируем вставку для системы отмены действий
-            register_undo $txt "insert" $new_code $start_pos
+        } elseif {$selection_mode == 2} {
+            # Устанавливаем конечную позицию и выделяем текст
+            set end_pos $pos
+            perform_selection $widget
+            set selection_mode 0
+            
+            # Показываем краткое подтверждение
+            show_status "Блок выделен. Используйте стандартные операции (Ctrl+C, Ctrl+X, Ctrl+V)"
+            
+            # Даём визуальную обратную связь - мигаем выделением
+            flash_selection $widget
+            
+            # Фокус на виджет для немедленного использования горячих клавиш
+            focus $widget
         }
-
-        # Отмечаем файл как модифицированный
-        if {[info exists ::core::modified_tabs($current_tab)]} {
-            set ::core::modified_tabs($current_tab) 1
-            if {[info commands ::core::check_modified] ne ""} {
-                ::core::check_modified $current_tab
+    }
+    
+    # Выполнение выделения
+    proc perform_selection {widget} {
+        variable start_pos
+        variable end_pos
+        
+        # Очищаем предыдущие выделения
+        $widget tag remove sel 1.0 end
+        
+        # Определяем порядок (чтобы start <= end)
+        if {[$widget compare $start_pos > $end_pos]} {
+            set temp $start_pos
+            set start_pos $end_pos
+            set end_pos $temp
+        }
+        
+        # Выделяем текст
+        $widget tag add sel $start_pos $end_pos
+        
+        # Устанавливаем курсор в начало выделения
+        $widget mark set insert $start_pos
+        
+        # Прокручиваем к началу выделения
+        $widget see $start_pos
+        
+        # Обновляем отображение
+        update idletasks
+    }
+    
+    # Мигание выделением для визуальной обратной связи
+    proc flash_selection {widget} {
+        variable start_pos
+        variable end_pos
+        
+        if {$start_pos eq "" || $end_pos eq ""} { return }
+        
+        # Сохраняем текущие цвета выделения
+        set old_bg [$widget cget -selectbackground]
+        set old_fg [$widget cget -selectforeground]
+        
+        # Меняем цвет на 200 мс
+        $widget configure -selectbackground "#FF9900" -selectforeground "#000000"
+        update idletasks
+        after 200 [list $widget configure -selectbackground $old_bg -selectforeground $old_fg]
+    }
+    
+    # Показать статус (если есть строка состояния, иначе в консоль)
+    proc show_status {message} {
+        # Попробуем найти или создать простую строку состояния
+        if {![winfo exists .status]} {
+            # Создаем простую строку состояния внизу окна
+            ttk::frame .status -relief sunken -borderwidth 1
+            ttk::label .status.label -textvariable ::status_message
+            pack .status.label -fill both -expand 1 -padx 2 -pady 1
+            pack .status -side bottom -fill x
+            set ::status_message ""
+        }
+        
+        set ::status_message $message
+        
+        # Автоматически очищаем через 3 секунды
+        after 3000 {set ::status_message ""}
+        
+        # Также выводим в консоль для отладки
+        puts "Block: $message"
+    }
+    
+    # Очистка выделения (может быть вызвана из других мест)
+    proc clear_selection {} {
+        variable selection_mode
+        variable start_pos
+        variable end_pos
+        
+        set selection_mode 0
+        set start_pos {}
+        set end_pos {}
+        
+        # Очищаем выделение во всех текстовых виджетах
+        foreach tab [.tabs tabs] {
+            set txt $tab.text
+            if {[winfo exists $txt]} {
+                $txt tag remove sel 1.0 end
             }
         }
+        
+        show_status "Выделение очищено"
+    }
+    
+    # Показать справку
+    proc show_help {} {
+        set help_text "Блочное выделение - минималистичный плагин
 
-        # Если включена опция "Заменить все"
-        if {$replace_all} {
-            set count 1
-            while {[find_complex_replace $start_marker $end_marker]} {
-                if {[$txt tag ranges sel] eq ""} {
-                    break
-                }
-                set start_pos [$txt index sel.first]
-                set end_pos [$txt index sel.last]
-                
-                # Сохраняем исходный текст для Undo
-                set original_text [$txt get $start_pos $end_pos]
-                
-                # Регистрируем удаление для системы отмены действий
-                register_undo $txt "delete" $original_text $start_pos $end_pos
-                
-                # Удаляем выделение
-                $txt delete $start_pos $end_pos
-                
-                # Вставляем новый код (если не пустой)
-                if {$new_code ne ""} {
-                    $txt insert $start_pos $new_code
-                    
-                    # Регистрируем вставку для системы отмены действий
-                    register_undo $txt "insert" $new_code $start_pos
-                }
-                
-                incr count
-            }
-            tk_messageBox -icon info -title "Замена" \
-                -message "Заменено блоков: $count"
-        } else {
-            # Ищем следующий блок через небольшую задержку
-            after 100 [list ::plugin::block::find_complex_replace $start_marker $end_marker]
-        }
+Использование:
+1. Нажмите и удерживайте Ctrl+Shift
+2. Кликните левой кнопкой мыши в начальной точке
+3. Отпустите Ctrl+Shift
+4. Перейдите к конечной точке
+5. Снова нажмите и удерживайте Ctrl+Shift
+6. Кликните в конечной точке
+7. Отпустите Ctrl+Shift
+
+Текст между точками будет автоматически выделен.
+После этого можно использовать стандартные операции:
+• Ctrl+C - копировать
+• Ctrl+X - вырезать  
+• Ctrl+V - вставить (заменить выделенное)
+• Delete - удалить
+
+Для отмены выделения:
+• Просто выделите другой текст обычным способом
+• Или нажмите Ctrl+Shift+клик вне текста
+"
+        tk_messageBox -title "Справка - Блочное выделение" \
+            -message $help_text -icon info
     }
 }
 
-# Инициализация плагина - вызываем только один раз
+# Автоматическая инициализация при загрузке плагина
 ::plugin::block::init
+
+# Добавляем кнопку в панель инструментов для справки (опционально)
+# и глобальную горячую клавишу для очистки выделения
+namespace eval ::plugin::block {
+    # Регистрируем кнопку справки (если нужно)
+    if {[info commands ::core::register_plugin_button] ne ""} {
+        ::core::register_plugin_button "block" "🧱 Block" \
+            ::plugin::block::show_help "" 4
+    }
+    
+    # Горячая клавиша для очистки выделения
+    bind . <Control-Shift-Escape> "::plugin::block::clear_selection"
+    
+    # Также очищаем выделение при обычном клике без модификаторов
+    # (но только если мы не в процессе выбора второй точки)
+    proc check_clear_on_normal_click {} {
+        variable selection_mode
+        if {$selection_mode == 0} {
+            clear_selection
+        }
+    }
+    
+    # Привязываем проверку ко всем текстовым виджетам
+    foreach tab [.tabs tabs] {
+        set txt $tab.text
+        if {[winfo exists $txt]} {
+            bind $txt <Button-1> "+::plugin::block::check_clear_on_normal_click"
+        }
+    }
+}
