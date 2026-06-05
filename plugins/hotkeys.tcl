@@ -3,13 +3,14 @@
 # Updated: 2025-05-08 for stable block Undo/Redo functionality
 # Updated: 2025-05-14 Добавлены привязки для кириллической раскладки с использованием корректных keysyms
 # Updated: 2025-05-20 Добавлена поддержка кириллической клавиши для Ctrl+S (сохранение)
+# Updated: 2025-05-23 Убрано контекстное меню, правая кнопка = вставка, средняя = PRIMARY
 
 namespace eval ::plugin::hotkeys {
     # Описание плагина
     variable plugin_info
     array set plugin_info {
         name "Editor Hotkeys"
-        version "1.3"
+        version "1.5"
         description "Настройка горячих клавиш редактора с надежным Undo/Redo для блочных операций"
         author "totiks2012"
     }
@@ -28,6 +29,10 @@ namespace eval ::plugin::hotkeys {
     # Массивы для хранения истории для повтора
     variable redo_stack
     array set redo_stack {}
+    
+    # Флаг для отслеживания блочной группировки
+    variable block_grouping
+    array set block_grouping {}
     
     # Отладочная переменная (включить для диагностики)
     variable debug 0
@@ -115,6 +120,7 @@ namespace eval ::plugin::hotkeys {
     proc init_char_stacks {widget} {
         variable char_stack
         variable redo_stack
+        variable block_grouping
         
         if {![info exists char_stack($widget)]} {
             set char_stack($widget) [list]
@@ -122,12 +128,29 @@ namespace eval ::plugin::hotkeys {
         if {![info exists redo_stack($widget)]} {
             set redo_stack($widget) [list]
         }
+        if {![info exists block_grouping($widget)]} {
+            set block_grouping($widget) 0
+        }
     }
     
-    # Добавление действия в стек истории
+    # Начало блочной операции
+    proc begin_block {widget} {
+        variable block_grouping
+        init_char_stacks $widget
+        set block_grouping($widget) 1
+    }
+    
+    # Завершение блочной операции
+    proc end_block {widget} {
+        variable block_grouping
+        set block_grouping($widget) 0
+    }
+    
+    # Добавление действия в стек истории с блочной группировкой
     proc push_char {widget action_type text start_pos {end_pos ""}} {
         variable char_stack
         variable redo_stack
+        variable block_grouping
         variable debug
         
         init_char_stacks $widget
@@ -135,8 +158,8 @@ namespace eval ::plugin::hotkeys {
         set timestamp [clock milliseconds]
         set action [list $action_type $text $start_pos $end_pos $timestamp]
         
-        # Простая группировка для последовательных вставок/удалений
-        if {[llength $char_stack($widget)] > 0} {
+        # Проверяем, нужно ли группировать с предыдущей операцией
+        if {[llength $char_stack($widget)] > 0 && $block_grouping($widget)} {
             set last_action [lindex $char_stack($widget) end]
             set last_type [lindex $last_action 0]
             set last_text [lindex $last_action 1]
@@ -144,26 +167,47 @@ namespace eval ::plugin::hotkeys {
             set last_end [lindex $last_action 3]
             set last_time [lindex $last_action 4]
             
-            if {$last_type eq $action_type && [expr {$timestamp - $last_time}] < 500 && 
-                $action_type in {insert delete} && $last_end eq $start_pos} {
-                if {$action_type eq "insert"} {
+            # Группируем только если:
+            # 1. Типы операций одинаковые
+            # 2. Операции произошли в течение 1 секунды друг от друга
+            # 3. Это операции вставки или удаления
+            # 4. Позиции совпадают (для последовательных операций)
+            if {$last_type eq $action_type && [expr {$timestamp - $last_time}] < 1000 && 
+                $action_type in {insert delete cut paste delete_line}} {
+                
+                # Для вставки: группируем если позиция вставки совпадает с концом предыдущей вставки
+                if {$action_type eq "insert" && $last_end eq $start_pos} {
                     set combined_text "$last_text$text"
                     set char_stack($widget) [lreplace $char_stack($widget) end end \
                         [list $action_type $combined_text $last_start $end_pos $timestamp]]
-                    if {$debug} { puts "Grouped insert: $combined_text at $last_start" }
+                    if {$debug} { puts "Block grouped insert: $combined_text at $last_start" }
                     set redo_stack($widget) [list]
                     return
-                } elseif {$action_type eq "delete"} {
-                    set combined_text "$text$last_text"
+                }
+                
+                # Для удаления: группируем если позиция удаления совпадает с началом предыдущего удаления
+                if {$action_type eq "delete" && $last_start eq $start_pos} {
+                    set combined_text "$last_text$text"
                     set char_stack($widget) [lreplace $char_stack($widget) end end \
-                        [list $action_type $combined_text $start_pos $last_end $timestamp]]
-                    if {$debug} { puts "Grouped delete: $combined_text from $start_pos to $last_end" }
+                        [list $action_type $combined_text $start_pos $end_pos $timestamp]]
+                    if {$debug} { puts "Block grouped delete: $combined_text from $start_pos" }
+                    set redo_stack($widget) [list]
+                    return
+                }
+                
+                # Для cut: группируем если позиции смежные
+                if {$action_type eq "cut" && $last_end eq $start_pos} {
+                    set combined_text "$last_text$text"
+                    set char_stack($widget) [lreplace $char_stack($widget) end end \
+                        [list $action_type $combined_text $last_start $end_pos $timestamp]]
+                    if {$debug} { puts "Block grouped cut: $combined_text from $last_start" }
                     set redo_stack($widget) [list]
                     return
                 }
             }
         }
         
+        # Если не группируем или условия не выполнены, добавляем как новое действие
         lappend char_stack($widget) $action
         set redo_stack($widget) [list]
         
@@ -178,6 +222,7 @@ namespace eval ::plugin::hotkeys {
     proc undo_char {widget} {
         variable char_stack
         variable redo_stack
+        variable block_grouping
         variable debug
         
         init_char_stacks $widget
@@ -238,7 +283,7 @@ namespace eval ::plugin::hotkeys {
         
         set tab [.tabs select]
         if {$tab ne "" && [info exists ::core::tab_files($tab)]} {
-            ::core::check_modified $tab
+            ::core::update_ui_state
         }
     }
     
@@ -246,6 +291,7 @@ namespace eval ::plugin::hotkeys {
     proc redo_char {widget} {
         variable char_stack
         variable redo_stack
+        variable block_grouping
         variable debug
         
         init_char_stacks $widget
@@ -310,7 +356,7 @@ namespace eval ::plugin::hotkeys {
         
         set tab [.tabs select]
         if {$tab ne "" && [info exists ::core::tab_files($tab)]} {
-            ::core::check_modified $tab
+            ::core::update_ui_state
         }
     }
     
@@ -322,6 +368,28 @@ namespace eval ::plugin::hotkeys {
                 [string match <Control-Shift-*> $binding]} {
                 bind Text $binding {}
             }
+        }
+        
+        # Средняя кнопка — вставка выделенного текста (PRIMARY) в позицию клика
+        catch {bind Text <Button-2> {}}
+        bind Text <ButtonPress-2> {
+            set sel ""
+            catch {set sel [selection get -selection PRIMARY -type STRING]}
+            if {$sel ne ""} {
+                set click_pos [%W index @%x,%y]
+                %W mark set insert $click_pos
+                %W insert $click_pos $sel
+                if {[info exists ::plugin::hotkeys::bound_widgets(%W)]} {
+                    ::plugin::hotkeys::begin_block %W
+                    ::plugin::hotkeys::push_char %W "paste" $sel $click_pos
+                    ::plugin::hotkeys::end_block %W
+                }
+                set tab [.tabs select]
+                if {$tab ne "" && [info exists ::core::tab_files($tab)]} {
+                    ::core::update_ui_state
+                }
+            }
+            return -code break
         }
         
         bind Text <Control-a> {
@@ -466,20 +534,45 @@ namespace eval ::plugin::hotkeys {
         catch {$widget configure -undo 0}
         bindtags $widget "$widget Text [winfo toplevel $widget] all"
         
+        # Привязка для правой кнопки мыши (вставка из CLIPBOARD / аналог Ctrl+V)
+        bind $widget <Button-3> {
+            ::plugin::hotkeys::begin_block %W
+            set start_pos [%W index insert]
+            tk_textPaste %W
+            set clipboard ""
+            catch {set clipboard [selection get -selection CLIPBOARD -type STRING]}
+            if {$clipboard ne ""} {
+                ::plugin::hotkeys::push_char %W "paste" $clipboard $start_pos
+            }
+            ::plugin::hotkeys::end_block %W
+            set tab [.tabs select]
+            if {[info exists ::core::tab_files($tab)]} {
+                ::core::update_ui_state
+            }
+            return -code break
+        }
+        
+        # Средняя кнопка мыши обрабатывается на уровне Text-класса (setup_text_class_bindings)
+        
         # BIND: Сохранить (save) - Control+S
         bind $widget <Control-s> ::plugin::hotkeys::save_without_artifacts
         bind $widget <Control-Key-s> ::plugin::hotkeys::save_without_artifacts
         # Альтернативный биндинг для кириллической "ы" (U+044B) с использованием корректного keysym
         bind $widget <Control-Cyrillic_yeru> ::plugin::hotkeys::save_without_artifacts
         
+        # Обработка ввода с блочной группировкой
         bind $widget <KeyPress> {
             if {"%A" ne "" && [string length "%A"] == 1} {
                 set pos [%W index insert]
+                ::plugin::hotkeys::begin_block %W
                 ::plugin::hotkeys::push_char %W "insert" "%A" $pos
+                ::plugin::hotkeys::end_block %W
             }
         }
         
+        # Обработка BackSpace с блочной группировкой
         bind $widget <BackSpace> {
+            ::plugin::hotkeys::begin_block %W
             if {[%W tag ranges sel] ne ""} {
                 set start_pos [%W index sel.first]
                 set end_pos [%W index sel.last]
@@ -492,14 +585,17 @@ namespace eval ::plugin::hotkeys {
                 %W delete "insert-1c" insert
                 ::plugin::hotkeys::push_char %W "delete" $char $pos
             }
+            ::plugin::hotkeys::end_block %W
             set tab [.tabs select]
             if {$tab ne "" && [info exists ::core::tab_files($tab)]} {
-                ::core::check_modified $tab
+                ::core::update_ui_state
             }
             return -code break
         }
         
+        # Обработка Delete с блочной группировкой
         bind $widget <Delete> {
+            ::plugin::hotkeys::begin_block %W
             if {[%W tag ranges sel] ne ""} {
                 set start_pos [%W index sel.first]
                 set end_pos [%W index sel.last]
@@ -512,9 +608,10 @@ namespace eval ::plugin::hotkeys {
                 %W delete insert "insert+1c"
                 ::plugin::hotkeys::push_char %W "delete" $char $pos
             }
+            ::plugin::hotkeys::end_block %W
             set tab [.tabs select]
             if {$tab ne "" && [info exists ::core::tab_files($tab)]} {
-                ::core::check_modified $tab
+                ::core::update_ui_state
             }
             return -code break
         }
@@ -551,8 +648,9 @@ namespace eval ::plugin::hotkeys {
             return -code break
         }
         
-        # BIND: Вырезать (cut)
+        # BIND: Вырезать (cut) с блочной группировкой
         bind $widget <Control-x> {
+            ::plugin::hotkeys::begin_block %W
             if {[%W tag ranges sel] ne ""} {
                 set start_pos [%W index sel.first]
                 set text [%W get sel.first sel.last]
@@ -560,9 +658,10 @@ namespace eval ::plugin::hotkeys {
                 ::plugin::hotkeys::push_char %W "cut" $text $start_pos
                 set tab [.tabs select]
                 if {[info exists ::core::tab_files($tab)]} {
-                    ::core::check_modified $tab
+                    ::core::update_ui_state
                 }
             }
+            ::plugin::hotkeys::end_block %W
             return -code break
         }
         
@@ -581,8 +680,9 @@ namespace eval ::plugin::hotkeys {
             return -code break
         }
         
-        # BIND: Вставить (paste)
+        # BIND: Вставить (paste) с блочной группировкой
         bind $widget <Control-v> {
+            ::plugin::hotkeys::begin_block %W
             set start_pos [%W index insert]
             tk_textPaste %W
             set clipboard ""
@@ -590,14 +690,16 @@ namespace eval ::plugin::hotkeys {
             if {$clipboard ne ""} {
                 ::plugin::hotkeys::push_char %W "paste" $clipboard $start_pos
             }
+            ::plugin::hotkeys::end_block %W
             set tab [.tabs select]
             if {[info exists ::core::tab_files($tab)]} {
-                ::core::check_modified $tab
+                ::core::update_ui_state
             }
             return -code break
         }
         # Альтернативный биндинг для кириллической "м" (U+043C) с использованием корректного keysym
         bind $widget <Control-Cyrillic_em> {
+            ::plugin::hotkeys::begin_block %W
             set start_pos [%W index insert]
             tk_textPaste %W
             set clipboard ""
@@ -605,38 +707,47 @@ namespace eval ::plugin::hotkeys {
             if {$clipboard ne ""} {
                 ::plugin::hotkeys::push_char %W "paste" $clipboard $start_pos
             }
+            ::plugin::hotkeys::end_block %W
             set tab [.tabs select]
             if {[info exists ::core::tab_files($tab)]} {
-                ::core::check_modified $tab
+                ::core::update_ui_state
             }
             return -code break
         }
         
+        # BIND: Удалить строку (delete line) с блочной группировкой
         bind $widget <Control-d> {
+            ::plugin::hotkeys::begin_block %W
             set start_pos [%W index "insert linestart"]
             set text [%W get "insert linestart" "insert lineend + 1 chars"]
             %W delete "insert linestart" "insert lineend + 1 chars"
             ::plugin::hotkeys::push_char %W "delete_line" $text $start_pos
+            ::plugin::hotkeys::end_block %W
             set tab [.tabs select]
             if {[info exists ::core::tab_files($tab)]} {
-                ::core::check_modified $tab
+                ::core::update_ui_state
             }
             return -code break
         }
         
+        # BIND: Дублировать строку (duplicate line) с блочной группировкой
         bind $widget <Control-l> {
+            ::plugin::hotkeys::begin_block %W
             set start_pos [%W index "insert lineend"]
             set text [%W get "insert linestart" "insert lineend"]
             %W insert "insert lineend" "\n$text"
             ::plugin::hotkeys::push_char %W "insert" "\n$text" $start_pos
+            ::plugin::hotkeys::end_block %W
             set tab [.tabs select]
             if {[info exists ::core::tab_files($tab)]} {
-                ::core::check_modified $tab
+                ::core::update_ui_state
             }
             return -code break
         }
         
+        # BIND: Комментирование строки (comment line) с блочной группировкой
         bind $widget <Control-slash> {
+            ::plugin::hotkeys::begin_block %W
             set linenumber [expr {int([%W index insert])}]
             set start_pos "$linenumber.0"
             set orig_line [%W get $start_pos "$linenumber.0 lineend"]
@@ -648,13 +759,15 @@ namespace eval ::plugin::hotkeys {
             %W delete $start_pos "$linenumber.0 lineend"
             %W insert $start_pos $new_line
             ::plugin::hotkeys::push_char %W "comment_toggle" $orig_line $start_pos
+            ::plugin::hotkeys::end_block %W
             set tab [.tabs select]
             if {[info exists ::core::tab_files($tab)]} {
-                ::core::check_modified $tab
+                ::core::update_ui_state
             }
             return -code break
         }
         
+        # BIND: Переключение переноса строк
         bind $widget <Alt-z> {
             if {[%W cget -wrap] eq "none"} {
                 %W configure -wrap word
@@ -664,18 +777,21 @@ namespace eval ::plugin::hotkeys {
             return -code break
         }
         
+        # BIND: Перемещение к началу слова
         bind $widget <Control-Left> {
             %W mark set insert {insert wordstart}
             %W see insert
             return -code break
         }
         
+        # BIND: Перемещение к концу слова
         bind $widget <Control-Right> {
             %W mark set insert {insert wordend}
             %W see insert
             return -code break
         }
         
+        # BIND: Перемещение к началу строки/первому не-пробельному символу
         bind $widget <Home> {
             set line_start [%W index {insert linestart}]
             set current_pos [%W index insert]
